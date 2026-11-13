@@ -13,6 +13,7 @@ use kernel::hil::uart;
 use kernel::utilities::StaticRef;
 use kernel::utilities::cells::OptionalCell;
 use kernel::utilities::cells::TakeCell;
+use kernel::utilities::io_write::IoWrite;
 use kernel::utilities::registers::interfaces::{ReadWriteable, Readable, Writeable};
 
 use crate::registers::uart_regs::UartRegisters;
@@ -308,8 +309,7 @@ impl<'a> Uart<'a> {
         }
     }
 
-    pub fn transmit_sync(&self, bytes: &[u8]) {
-        let regs = self.registers;
+    fn transmit_sync(regs: &UartRegisters, bytes: &[u8]) {
         for b in bytes.iter() {
             while regs.status.is_set(STATUS::TXFULL) {}
             regs.wdata.write(WDATA::WDATA.val(*b as u32));
@@ -440,6 +440,53 @@ impl DeferredCallClient for Uart<'_> {
 
     fn register(&'static self) {
         self.rx_deferred_call.register(self);
+    }
+}
+
+/// A synchronous writer for the lowRISC UART useful for panics.
+///
+/// For boards that want to use the UART to display panic messages, this
+/// provides an implementation of
+/// [`PanicWriter`](kernel::platform::chip::PanicWriter) with synchronous
+/// output.
+///
+/// This is only to be used by panic messages and is not used within the normal
+/// operation of the Tock kernel. It does not hold a full [`Uart`] instance, as
+/// creating that one invokes [`DeferredCall::new`]. That fails for panics
+/// raised in a trap handler, where the deferred call state is not accessible.
+struct UartPanicWriter {
+    registers: StaticRef<UartRegisters>,
+}
+
+impl IoWrite for UartPanicWriter {
+    fn write(&mut self, buf: &[u8]) -> usize {
+        Uart::transmit_sync(&self.registers, buf);
+        buf.len()
+    }
+}
+
+impl core::fmt::Write for UartPanicWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        self.write(s.as_bytes());
+        Ok(())
+    }
+}
+
+/// Configuration for the synchronous UART panic writer.
+pub struct UartPanicWriterConfig {
+    pub registers: StaticRef<UartRegisters>,
+}
+
+impl kernel::platform::chip::PanicWriter for Uart<'_> {
+    type Config = UartPanicWriterConfig;
+
+    fn create_panic_writer(
+        config: Self::Config,
+        _panic: &core::panic::PanicInfo,
+    ) -> impl IoWrite + core::fmt::Write {
+        UartPanicWriter {
+            registers: config.registers,
+        }
     }
 }
 
